@@ -10,7 +10,9 @@ import json
 
 # Paths to files
 TRANSACTION_CSV = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\transaction_velocity.csv"
+#TRANSACTION_CSV = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\transaction_velocity2.csv"
 WALLET_ACTIVITY_NDJSON = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\seen_wallets.ndjson"  # Path to your NDJSON file
+#WALLET_ACTIVITY_NDJSON = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\seen_wallets2.ndjson"
 
 #todo also for each wallet check if its overall buying or selling.
 
@@ -23,7 +25,7 @@ def read_wallet_activity_old(file_path):
             wallet_map = record['walletMap']
             # Extract all wallets
             wallets = [wallet for wallet in wallet_map.keys()]
-            data.append({'timestamp': timestamp, 'wallets': ', '.join(wallets)})#here i want to also add if the wallet was sellign or buying at thsi timestamp
+            data.append({'timestamp': timestamp, 'wallets': ', '.join(wallets)})#here I want to also add if the wallet was sellign or buying at thsi timestamp
     return pd.DataFrame(data)
 
 def read_wallet_activity(file_path): #uses the extra buying and selling data
@@ -41,7 +43,7 @@ def read_wallet_activity(file_path): #uses the extra buying and selling data
             for wallet, value in wallet_map.items():
                 wallets.append(wallet)
                 # Determine activity based on value
-                activities.append("buying" if value > 0 else "selling")
+                activities.append(str(value))
 
             # Combine data into a single row
             data.append({
@@ -311,10 +313,11 @@ def draw_neighborhood_ellipses(ax, timestamps, time_window, data, column='market
         )
         ax.add_patch(ellipse)
 
-def filter_wallets_for_neighborhoods(wallet_activity, peak_trough_timestamps, time_window, min_occurrences,
+
+#TODO add another parameter where the wallets dont necessarily have to be exclusively within the
+# neighbourhoods of peaks and troths but "mostly" like 80% of the time ect...
+def filter_wallets_for_neighborhoods_old(wallet_activity, peak_trough_timestamps, time_window, min_occurrences,
                                      within_hours=200):
-    #TODO add another parameter where the wallets dont necessarily have to be exclusively within the
-    # neighbourhoods of peaks and troths but "mostly" like 80% of the time ect...
 
     start_time = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=within_hours)
     # Filter wallet activity by start_time
@@ -344,9 +347,17 @@ def filter_wallets_for_neighborhoods(wallet_activity, peak_trough_timestamps, ti
     # Ensure wallets only appear in neighborhoods
     exclusive_wallets = []
     for wallet in qualifying_wallets:
-        wallet_timestamps = wallet_activity[wallet_activity['wallets'] == wallet]['timestamp']
+        # Flatten the wallets column and filter for the specific wallet
+        flattened_activity = wallet_activity.assign(
+            flattened_wallets=wallet_activity['wallets'].str.split(', ')
+        ).explode('flattened_wallets')
 
-        # Check if all appearances are within any neighborhood
+        # Filter for timestamps where the current wallet appears
+        wallet_timestamps = flattened_activity[
+            flattened_activity['flattened_wallets'] == wallet
+            ]['timestamp']
+
+        # Check if all appearances of the wallet are within the neighborhoods
         exclusively_in_neighborhoods = all(
             any(
                 abs((ts - peak_or_trough).total_seconds()) <= time_window.total_seconds()
@@ -359,6 +370,81 @@ def filter_wallets_for_neighborhoods(wallet_activity, peak_trough_timestamps, ti
             exclusive_wallets.append(wallet)
 
     return exclusive_wallets
+
+
+def filter_wallets_for_neighborhoods(
+        wallet_activity, peak_trough_timestamps, time_window,
+        min_occurrences, min_total_occurrences=8, min_percentage_in_neighborhood=30, within_hours=200
+):
+    """
+    Filters wallets to include only those that:
+    1. Appear at least `min_occurrences` times in the neighborhoods of peaks/troughs.
+    2. Appear at least `min_total_occurrences` times in the entire dataset.
+    3. Appear within neighborhoods at least `min_percentage_in_neighborhood`% of their total occurrences.
+
+    Args:
+        wallet_activity (pd.DataFrame): Wallet activity DataFrame.
+        peak_trough_timestamps (list): List of peak and trough timestamps.
+        time_window (pd.Timedelta): Time window around each peak/trough.
+        min_occurrences (int): Minimum occurrences in neighborhoods.
+        min_total_occurrences (int): Minimum total occurrences in the dataset.
+        min_percentage_in_neighborhood (float): Minimum percentage of neighborhood occurrences.
+        within_hours (int): Number of hours to consider for filtering the wallet activity.
+
+    Returns:
+        list: Wallets meeting the criteria.
+    """
+    start_time = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=within_hours)
+
+    # Filter wallet activity by start_time
+    wallet_activity = wallet_activity[wallet_activity['timestamp'] >= start_time]
+
+    # Flatten the wallets column into individual wallet entries
+    flattened_activity = wallet_activity.assign(
+        flattened_wallets=wallet_activity['wallets'].str.split(', ')
+    ).explode('flattened_wallets')
+
+    # Count total occurrences of each wallet across the entire dataset
+    total_occurrences = flattened_activity['flattened_wallets'].value_counts()
+
+    # Identify wallets in the neighborhoods of peaks and troughs
+    wallet_neighborhood_counts = {}
+    for timestamp in peak_trough_timestamps:
+        # Find wallets in the current neighborhood
+        nearby_wallets = wallet_activity[
+            (wallet_activity['timestamp'] >= timestamp - time_window) &
+            (wallet_activity['timestamp'] <= timestamp + time_window)
+            ]
+
+        # Count each wallet only once per neighborhood using a set
+        unique_wallets = set(
+            wallet for wallets_str in nearby_wallets['wallets'] for wallet in wallets_str.split(', ')
+        )
+        for wallet in unique_wallets:
+            if wallet not in wallet_neighborhood_counts:
+                wallet_neighborhood_counts[wallet] = 0
+            wallet_neighborhood_counts[wallet] += 1  # Increment by 1 for this neighborhood
+
+    # Filter wallets that meet the minimum occurrence requirement in neighborhoods
+    qualifying_wallets = [
+        wallet for wallet, count in wallet_neighborhood_counts.items() if count >= min_occurrences
+    ]
+
+    # Apply additional criteria (total occurrences and percentage in neighborhoods)
+    strict_qualifying_wallets = []
+    for wallet in qualifying_wallets:
+        total_count = total_occurrences.get(wallet, 0)
+        neighborhood_count = wallet_neighborhood_counts.get(wallet, 0)
+
+        # Check if wallet meets total occurrences and percentage criteria
+        if total_count >= min_total_occurrences:
+            percentage_in_neighborhood = (neighborhood_count / total_count) * 100
+            if percentage_in_neighborhood >= min_percentage_in_neighborhood:
+                strict_qualifying_wallets.append(wallet)
+
+    return strict_qualifying_wallets
+
+
 def annotate_deviation(ax, timestamp, y_value, wallet_activity, qualifying_wallets_list, time_window, amount_of_different_wallets):
 
     # Filter wallets in the neighborhood of the given timestamp
@@ -384,6 +470,44 @@ def annotate_deviation(ax, timestamp, y_value, wallet_activity, qualifying_walle
                 fontsize=8, color='cyan', ha='center', va='center',
                 bbox=dict(boxstyle="round,pad=0.3", edgecolor='cyan', facecolor='white', alpha=0.1)
             )
+
+def annotate_wallet_activity(ax, timestamp, y_value, wallet_activity, qualifying_wallets_list, time_window):
+    # Filter wallets in the neighborhood of the given timestamp
+    nearby_wallets = wallet_activity[
+        (wallet_activity['timestamp'] >= timestamp - time_window) &
+        (wallet_activity['timestamp'] <= timestamp + time_window)
+    ]
+
+    if not nearby_wallets.empty:
+        # Flatten the comma-separated wallets and their activities into individual rows
+        flattened = nearby_wallets.assign(
+            wallets=nearby_wallets['wallets'].str.split(', '),
+            activity=nearby_wallets['activity'].str.split(', ').apply(lambda x: [float(a) for a in x])
+        ).explode(['wallets', 'activity'])
+
+        # Filter only qualifying wallets
+        qualifying_data = flattened[flattened['wallets'].isin(qualifying_wallets_list)]
+
+        if not qualifying_data.empty:
+            # Calculate net activity per wallet
+            net_activity = qualifying_data.groupby('wallets')['activity'].sum().reset_index()
+
+            # Format the annotation text based on net activity
+            annotation_text = ', '.join(
+                f"{row['wallets'][:4]} {'buy' if row['activity'] > 0 else 'sell'}({abs(row['activity']):.0f})"
+                for _, row in net_activity.iterrows() if row['activity'] != 0
+            )
+
+            if annotation_text:  # Only annotate if there is meaningful data
+                # Adjust the annotation position by adding an offset to y_value
+                percent = 0.05 #move Down 5%
+                offset = percent * (ax.get_ylim()[1] - ax.get_ylim()[0])  # 5% of the y-axis range
+                ax.annotate(
+                    annotation_text,
+                    (timestamp, y_value + offset),  # Add offset to y_value
+                    fontsize=8, color='yellow', ha='center', va='center',
+                    bbox=dict(boxstyle="round,pad=0.3", edgecolor='yellow', facecolor='black', alpha=0.8)
+                )
 
 
 #silders
@@ -422,7 +546,6 @@ def update(none):
     qualifying_wallets_list = filter_wallets_for_neighborhoods(wallet_activity, peak_trough_timestamps, time_window, int(min_occurrences_slider.val))
 
     ax1.clear()
-
     annotate_wallet_rankings(ax1, wallet_activity, qualifying_wallets_list, peak_trough_timestamps, time_window)
 
     if not transaction_data_recent.empty:
@@ -469,6 +592,7 @@ def update(none):
                 amout_of_different_wallets_slider.val
             )
             ax1.plot(timestamp, y_value, 'ro')
+            annotate_wallet_activity(ax1, timestamp, y_value, wallet_activity, qualifying_wallets_list, time_window)
 
         for idx in troughs:
             timestamp = transaction_data.iloc[idx]['datetime']
@@ -510,6 +634,7 @@ def update(none):
                 amout_of_different_wallets_slider.val
             )
             ax1.plot(timestamp, y_value, 'bo')
+            annotate_wallet_activity(ax1, timestamp, y_value, wallet_activity, qualifying_wallets_list, time_window)
 
     connect_tops_and_bottoms(ax1, transaction_data, peaks, troughs, column='marketcap_ema_40', alpha=0.5)
 
