@@ -9,10 +9,10 @@ from scipy.signal import find_peaks
 import json
 
 # Paths to files
-TRANSACTION_CSV = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\transaction_velocity.csv"
-#TRANSACTION_CSV = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\transaction_velocity2.csv"
-WALLET_ACTIVITY_NDJSON = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\seen_wallets.ndjson"  # Path to your NDJSON file
-#WALLET_ACTIVITY_NDJSON = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\seen_wallets2.ndjson"
+#TRANSACTION_CSV = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\transaction_velocity.csv"
+TRANSACTION_CSV = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\transaction_velocity3.csv"
+#WALLET_ACTIVITY_NDJSON = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\seen_wallets.ndjson"  # Path to your NDJSON file
+WALLET_ACTIVITY_NDJSON = "C:\\Users\\RICHCEL.SOL\\Desktop\\MoneyMaker\\seen_wallets3.ndjson"
 
 #todo also for each wallet check if its overall buying or selling.
 
@@ -63,49 +63,23 @@ plt.subplots_adjust(bottom=0.2)  # Reserve 20% of the figure height for sliders
 fig.patch.set_facecolor('#121212')  # Set figure background to dark gray
 fig.patch.set_alpha(1.0)
 
-def find_tops_and_bottoms(data, column='marketcap_ema_40', distance=150, min_difference_percent=4,
-                          retracement_percent=20, min_time_distance=pd.Timedelta(minutes=2)):
-    """
-    Finds local tops (peaks) and bottoms (troughs) in the data with:
-    1. Minimum percentage difference between tops and bottoms.
-    2. A trailing mechanism to capture significant price rallies or drops.
-    3. Filters out consecutive peaks or troughs that are too close.
-    4. Enforces alternation between peaks and troughs.
 
-    Args:
-        data (pd.DataFrame): The data containing the column to analyze.
-        column (str): The column to find peaks and troughs in.
-        distance (int): Minimum horizontal distance between adjacent peaks/troughs.
-        min_difference_percent (float): Minimum percentage difference between tops and bottoms.
-        retracement_percent (float): Minimum retracement percentage to confirm a top after a rally.
-        min_time_distance (pd.Timedelta): Minimum time distance between consecutive peaks or troughs.
 
-    Returns:
-        tuple: Indices of significant peaks and troughs.
-    """
+def find_tops_and_bottoms_old(data, column='marketcap_ema_40', desired_time_distance_seconds=600, min_difference_percent=4,
+                          retracement_percent=20):
+    avg_time_interval = data['datetime'].diff().mean().total_seconds() #helps to convert time interval to distance
+    distance = int(desired_time_distance_seconds / avg_time_interval)
     # Calculate prominence threshold
     max_prominence = data[column].max() - data[column].min()
     prominence = 0.05 * max_prominence  # 5% of the range
-
     # Detect local maxima (peaks)
     peaks, _ = find_peaks(data[column], distance=distance, prominence=prominence)
-
     # Detect local minima (troughs)
     troughs, _ = find_peaks(-data[column], distance=distance, prominence=prominence)
 
     # Combine peaks and troughs in chronological order
     events = sorted([(idx, 'peak') for idx in peaks] + [(idx, 'trough') for idx in troughs])
 
-    # Ensure alternation between peaks and troughs
-    filtered_events = []
-    last_event_type = None
-
-    for idx, event_type in events:
-        if last_event_type is None or event_type != last_event_type:
-            # Enforce minimum time distance
-            if not filtered_events or abs((data.iloc[idx]['datetime'] - data.iloc[filtered_events[-1][0]]['datetime']).total_seconds()) >= min_time_distance.total_seconds():
-                filtered_events.append((idx, event_type))
-                last_event_type = event_type
 
     # Separate back into peaks and troughs
     filtered_peaks = [idx for idx, event_type in filtered_events if event_type == 'peak']
@@ -157,6 +131,98 @@ def find_tops_and_bottoms(data, column='marketcap_ema_40', distance=150, min_dif
             trailing_low = None
 
     return significant_peaks, significant_troughs
+
+from scipy.signal import find_peaks
+import pandas as pd
+
+def find_tops_and_bottoms(data, column='marketcap_ema_40', desired_time_distance_seconds=1200,
+                         min_difference_percent=15, stay_duration_seconds=3600):
+    """
+    Detects significant local price reversals, pumps, and dumps.
+
+    Args:
+        data (pd.DataFrame): Input data with a datetime column and a price column.
+        column (str): Column name for price data.
+        desired_time_distance_seconds (int): Minimum time distance between detected points in seconds.
+        min_difference_percent (float): Minimum percentage change to consider a reversal significant.
+        stay_duration_seconds (int): Minimum duration the price should stay above or below the prior average for pumps/dumps.
+
+    Returns:
+        tuple: Indices of identified peaks (before drops), troughs (before rises), pumps, and dumps.
+    """
+    avg_time_interval = data['datetime'].diff().mean().total_seconds()
+    distance = int(desired_time_distance_seconds / avg_time_interval)
+
+    # Calculate prominence threshold for find_peaks
+    max_prominence = data[column].max() - data[column].min()
+    prominence = 0.05 * max_prominence  # 5% of the range
+
+    # Detect initial peaks and troughs
+    peaks, _ = find_peaks(data[column], distance=distance, prominence=prominence)
+    troughs, _ = find_peaks(-data[column], distance=distance, prominence=prominence)
+
+    # Initialize lists for significant events
+    significant_peaks = []
+    significant_troughs = []
+    pumps = []
+    dumps = []
+
+    # Define helper function to calculate percentage change
+    def percentage_change(old, new):
+        return abs((new - old) / old) * 100
+
+    # Analyze peaks for drops and pumps
+    for peak in peaks:
+        peak_value = data.iloc[peak][column]
+        for i in range(peak + 1, len(data)):
+            future_value = data.iloc[i][column]
+            time_diff = (data.iloc[i]['datetime'] - data.iloc[peak]['datetime']).total_seconds()
+
+            # Check for significant drop
+            if percentage_change(peak_value, future_value) >= min_difference_percent and future_value < peak_value:
+                significant_peaks.append(peak)
+                break
+
+            # Check for pump (stays higher for the stay_duration_seconds)
+            if future_value > peak_value and time_diff >= stay_duration_seconds:
+                significant_peaks.append(peak)
+                break
+
+    # Analyze troughs for rises and dumps
+    for trough in troughs:
+        trough_value = data.iloc[trough][column]
+        for i in range(trough + 1, len(data)):
+            future_value = data.iloc[i][column]
+            time_diff = (data.iloc[i]['datetime'] - data.iloc[trough]['datetime']).total_seconds()
+
+            # Check for significant rise
+            if percentage_change(trough_value, future_value) >= min_difference_percent and future_value > trough_value:
+                significant_troughs.append(trough)
+                break
+
+            # Check for dump (stays lower for the stay_duration_seconds)
+            if future_value < trough_value and time_diff >= stay_duration_seconds:
+                significant_troughs.append(trough)
+                break
+
+    return significant_peaks, significant_troughs
+
+#TODO i think what is ideal in this case is to have a hybrid system where we will inpect
+# peaks and troths and also another function that will identify points just before the price reversed up and down
+def find_points_before_price_reversals(data, column='marketcap_ema_40'):
+    """
+    will have a few parameters to tweak its functionality on the fly but the basic idea is to identify points
+    will use some look-forwards window to determine significant enough price rise and then place a
+    point prior to the move ( which will have some adjustability and also a custom region ( asymmetrical)
+    :return:
+    """
+    #TODO MAKE THE FUNCTION SEPARATE FOR SIMPLICITY OF DEBUGGING AND POSSIBLY MERGE THE FUNCTIONS TOGETHER
+    # OR HAVE A 3RD FUNCTION THAT WILL MERGE PEAKS WITH THE PUMPS AND DUMPS SO THERE I NO CONFLICT BETWEEN THE POINTS
+    ema_40_points = data[column]
+    print(ema_40_points)
+
+
+
 def annotate_peaks_and_troughs(ax, data, peaks, troughs, column='marketcap_ema_40', label_offset=0.02):
     """
     Annotates each detected peak and trough in chronological order.
@@ -192,7 +258,7 @@ def annotate_peaks_and_troughs(ax, data, peaks, troughs, column='marketcap_ema_4
             bbox=dict(boxstyle="round,pad=0.3", edgecolor='white' if label_type == "Peak" else 'cyan',
                       facecolor='#333333', alpha=0.8)
         )
-
+    #print(labels)
     return labels  # Return the labels for potential debugging or reference
 
 def connect_tops_and_bottoms(ax, data, peaks, troughs, column='marketcap_ema_40', alpha=0.5, label_offset=0.02):
@@ -313,68 +379,9 @@ def draw_neighborhood_ellipses(ax, timestamps, time_window, data, column='market
         )
         ax.add_patch(ellipse)
 
-
-#TODO add another parameter where the wallets dont necessarily have to be exclusively within the
-# neighbourhoods of peaks and troths but "mostly" like 80% of the time ect...
-def filter_wallets_for_neighborhoods_old(wallet_activity, peak_trough_timestamps, time_window, min_occurrences,
-                                     within_hours=200):
-
-    start_time = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=within_hours)
-    # Filter wallet activity by start_time
-    wallet_activity = wallet_activity[wallet_activity['timestamp'] >= start_time]
-    # Identify wallets in the neighborhoods of peaks and troughs
-    wallet_neighborhood_counts = {}
-    for timestamp in peak_trough_timestamps:
-        # Find wallets in the current neighborhood
-        nearby_wallets = wallet_activity[
-            (wallet_activity['timestamp'] >= timestamp - time_window) &
-            (wallet_activity['timestamp'] <= timestamp + time_window)
-        ]
-
-        # Count each wallet only once per neighborhood using a set
-        unique_wallets = set(
-            wallet for wallets_str in nearby_wallets['wallets'] for wallet in wallets_str.split(', ')
-        )
-
-        for wallet in unique_wallets:
-            if wallet not in wallet_neighborhood_counts:
-                wallet_neighborhood_counts[wallet] = 0
-            wallet_neighborhood_counts[wallet] += 1  # Increment by 1 for this neighborhood
-    # Filter wallets that meet the minimum occurrence requirement
-    qualifying_wallets = [
-        wallet for wallet, count in wallet_neighborhood_counts.items() if count >= min_occurrences
-    ]
-    # Ensure wallets only appear in neighborhoods
-    exclusive_wallets = []
-    for wallet in qualifying_wallets:
-        # Flatten the wallets column and filter for the specific wallet
-        flattened_activity = wallet_activity.assign(
-            flattened_wallets=wallet_activity['wallets'].str.split(', ')
-        ).explode('flattened_wallets')
-
-        # Filter for timestamps where the current wallet appears
-        wallet_timestamps = flattened_activity[
-            flattened_activity['flattened_wallets'] == wallet
-            ]['timestamp']
-
-        # Check if all appearances of the wallet are within the neighborhoods
-        exclusively_in_neighborhoods = all(
-            any(
-                abs((ts - peak_or_trough).total_seconds()) <= time_window.total_seconds()
-                for peak_or_trough in peak_trough_timestamps
-            )
-            for ts in wallet_timestamps
-        )
-
-        if exclusively_in_neighborhoods:
-            exclusive_wallets.append(wallet)
-
-    return exclusive_wallets
-
-
 def filter_wallets_for_neighborhoods(
         wallet_activity, peak_trough_timestamps, time_window,
-        min_occurrences, min_total_occurrences=8, min_percentage_in_neighborhood=30, within_hours=200
+        min_occurrences, min_total_occurrences=5, min_percentage_in_neighborhood=60, within_hours=200
 ):
     """
     Filters wallets to include only those that:
@@ -500,7 +507,7 @@ def annotate_wallet_activity(ax, timestamp, y_value, wallet_activity, qualifying
 
             if annotation_text:  # Only annotate if there is meaningful data
                 # Adjust the annotation position by adding an offset to y_value
-                percent = 0.05 #move Down 5%
+                percent = -0.05 #move Down 5%
                 offset = percent * (ax.get_ylim()[1] - ax.get_ylim()[0])  # 5% of the y-axis range
                 ax.annotate(
                     annotation_text,
@@ -511,15 +518,20 @@ def annotate_wallet_activity(ax, timestamp, y_value, wallet_activity, qualifying
 
 
 #silders
+slider_minimum_occurrence_window = plt.axes([0.2, 0.1, 0.3, 0.03], facecolor='#333333')
+slider_minimum_occurrence = Slider(slider_minimum_occurrence_window, 'occurrence amount', valmin=5, valmax=200, valinit=5, valstep=5)
+
+slider_occurrence_percentage_window = plt.axes([0.2, 0.08, 0.3, 0.03], facecolor='#333333')
+slider_occurrence_percentage = Slider(slider_occurrence_percentage_window, 'occurrence in neighbourhoods percentage', valmin=10, valmax=100, valinit=50, valstep=10)
+
 slider_neighborhood_size_window = plt.axes([0.2, 0.03, 0.3, 0.03], facecolor='#333333')
 slider_neighborhood_size = Slider(slider_neighborhood_size_window, 'neighborhood size', valmin=1, valmax=30, valinit=5, valstep=1)
 
 min_occurrences_slider_window = plt.axes([0.2, 0.01, 0.3, 0.03], facecolor='#333333')
 min_occurrences_slider= Slider(min_occurrences_slider_window, 'Min occurrences', valmin=1, valmax=20, valinit=3, valstep=1)
 
-amout_of_different_wallets_window = plt.axes([0.2, 0.05, 0.3, 0.03], facecolor='#333333')
-amout_of_different_wallets_slider = Slider(amout_of_different_wallets_window, 'Minimum good wallets', valmin=1, valmax=10, valinit=2, valstep=1)
-
+amount_of_different_wallets_window = plt.axes([0.2, 0.05, 0.3, 0.03], facecolor='#333333')
+amount_of_different_wallets_slider = Slider(amount_of_different_wallets_window, 'Minimum good wallets', valmin=1, valmax=10, valinit=2, valstep=1)
 
 def update(none):
     transaction_data = pd.read_csv(TRANSACTION_CSV)
@@ -538,12 +550,13 @@ def update(none):
 
     # Find peaks and troughs
     peaks, troughs = find_tops_and_bottoms(transaction_data)
+    #find_points_before_price_reversals(transaction_data)
     peak_trough_timestamps = transaction_data.iloc[peaks]['datetime'].tolist() + transaction_data.iloc[troughs]['datetime'].tolist()
 
     # Filter wallets for neighborhoods
     time_window = pd.Timedelta(minutes=slider_neighborhood_size.val)  # Define the neighborhood range
 
-    qualifying_wallets_list = filter_wallets_for_neighborhoods(wallet_activity, peak_trough_timestamps, time_window, int(min_occurrences_slider.val))
+    qualifying_wallets_list = filter_wallets_for_neighborhoods(wallet_activity, peak_trough_timestamps, time_window, int(min_occurrences_slider.val),int(slider_minimum_occurrence.val),int(slider_occurrence_percentage.val))
 
     ax1.clear()
     annotate_wallet_rankings(ax1, wallet_activity, qualifying_wallets_list, peak_trough_timestamps, time_window)
@@ -589,7 +602,7 @@ def update(none):
                 wallet_activity,
                 qualifying_wallets_list,
                 time_window,
-                amout_of_different_wallets_slider.val
+                amount_of_different_wallets_slider.val
             )
             ax1.plot(timestamp, y_value, 'ro')
             annotate_wallet_activity(ax1, timestamp, y_value, wallet_activity, qualifying_wallets_list, time_window)
@@ -631,15 +644,17 @@ def update(none):
                 wallet_activity,
                 qualifying_wallets_list,
                 time_window,
-                amout_of_different_wallets_slider.val
+                amount_of_different_wallets_slider.val
             )
             ax1.plot(timestamp, y_value, 'bo')
             annotate_wallet_activity(ax1, timestamp, y_value, wallet_activity, qualifying_wallets_list, time_window)
 
-    connect_tops_and_bottoms(ax1, transaction_data, peaks, troughs, column='marketcap_ema_40', alpha=0.5)
+    #connect_tops_and_bottoms(ax1, transaction_data, peaks, troughs, column='marketcap_ema_40', alpha=0.5)
 
     draw_neighborhood_ellipses(ax1, peak_trough_timestamps, time_window, transaction_data, column='marketcap_ema_40',
                                alpha=0.1)
+    # Call the function inside the update function
+    annotate_peaks_and_troughs(ax1, transaction_data, peaks, troughs, column='marketcap_ema_40', label_offset=0.02)
 
     # Set x-axis limits
     start_time = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=20)
